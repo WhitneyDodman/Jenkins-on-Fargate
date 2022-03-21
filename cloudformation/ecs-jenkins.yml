@@ -1,0 +1,500 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploys Jenkinss on ECS/Fargate
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Parameters:
+          - VPC
+          - VPCCidr
+        Label:
+          default: Network Configuration
+      - Parameters:
+          - Cluster
+          - ServiceName
+          - ECRImage
+          - Subnets
+        Label:
+          default: ECS Service Configuration
+      - Parameters:
+          - ELBSubnets
+          - S3LoggingBucket
+          - SSLCertificateArn
+          - Scheme
+          - GitHubOAuth
+        Label:
+          default: ELB Configuration
+      - Parameters:
+          - CWBurstCreditThreshold
+          - CWBurstCreditPeriod
+        Label:
+          default: EFS Configuration
+      - Parameters:
+          - HostedZoneName
+          - HostedZoneId
+        Label:
+          default: DNS Configuration
+
+Parameters:
+  VPC:
+    Description: Select Virtual Private Cloud ID to deploy broker into.
+    Type: 'AWS::EC2::VPC::Id'
+  VPCCidr:
+    Type: String
+    Description: Cidr range for the VPC
+  Subnets:
+    Description: Subnets for ECS and EFS. (Should be PRIVATE subnets)
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  HostedZoneName:
+    Type: String
+    Description: The DNS domain name for the environment. (e.g. prod.rubicon.com)
+  HostedZoneId:
+    Description: The DNS Zone Id that matches the domain name.
+    Type: 'AWS::Route53::HostedZone::Id'
+  Cluster:
+    Type: String
+    Description: The short name or full Amazon Resource Name (ARN) of the cluster that you run your service on. If you do not specify a cluster, the default cluster is assumed.
+  ECRImage:
+    Type: String
+    Default: 369438986540.dkr.ecr.us-east-1.amazonaws.com/ecs-jenkins:latest
+    Description: The image used to start a container. This string is passed directly to the Docker daemon. 
+  ServiceName:
+    Type: String
+    Default: ecs-jenkins
+    Description: The name of your service. Up to 255 letters (uppercase and lowercase), numbers, underscores, and hyphens are allowed. Service names must be unique within a cluster, but you can have similarly named services in multiple clusters within a Region or across multiple Regions.
+  ELBSubnets:
+    Description: Subnets for the ELB. (Should be PUBLIC subnets if scheme is internet-facing)
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  S3LoggingBucket:
+    Type: String
+    Description: Name of the S3 bucket to log ELB requests
+  CWBurstCreditThreshold:
+    Default: '1000000000000'
+    Type: Number
+    Description: The minimum EFS Burst Credit level before generating an alarm.
+  CWBurstCreditPeriod:
+    Default: '12'
+    Type: Number
+    Description: >-
+      The number of periods over which the EFS Burst Credit level is compared to
+      the specified threshold.
+  SSLCertificateArn:
+    Type: String
+    Description: The arn of the SSL certificate to attache to the ELB.
+  Scheme:
+    Default: internal
+    Type: String
+    Description: Indicates whether the load balancer is Internet-facing or internal.
+    AllowedValues:
+      - internet-facing
+      - internal
+  GitHubOAuth:
+    Type: String
+    Description: The arn of the secrets manager secret that contains the oauth password
+
+Resources:
+### Credentials ###
+  # LocalAdminSecret:
+  #   Type: AWS::SecretsManager::Secret
+  #   Properties:
+  #     Name: !Sub 'Credentials-${ServiceName}'
+  #     Description: 'This is the credentials for the ECS Jenkins deployment'
+  #     GenerateSecretString:
+  #       SecretStringTemplate: '{"username": "jenkins-admin"}'
+  #       GenerateStringKey: password
+  #       PasswordLength: 16
+  #       ExcludePunctuation: 'true'
+
+### IAM Resources ###
+  ECSJenkinsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}Task-Role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'ssmmessages:CreateControlChannel'
+                  - 'ssmmessages:CreateDataChannel'
+                  - 'ssmmessages:OpenControlChannel'
+                  - 'ssmmessages:OpenDataChannel'
+                  - 'elasticfilesystem:ClientMount'
+                  - 'elasticfilesystem:ClientRootAccess'
+                  - "ecs:RegisterTaskDefinition"
+                  - "ecs:ListClusters"
+                  - "ecs:DescribeContainerInstances"
+                  - "ecs:ListTaskDefinitions"
+                  - "ecs:DescribeTaskDefinition"
+                  - "ecs:DeregisterTaskDefinition"
+                  - "ecs:ListContainerInstances"
+                  - "ecs:DescribeClusters"
+                  - "ecs:RunTask"
+                  - "ecs:StopTask"
+                  - "ecs:DescribeTasks"
+                  - "elasticfilesystem:DescribeAccessPoints"
+                  - "elasticfilesystem:DescribeFileSystems"
+                Resource: '*'
+        - PolicyName: secrets-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'secretsmanager:GetResourcePolicy'
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:ListSecretVersionIds'
+                Resource: !Ref GitHubOAuth
+        - PolicyName: logs-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                Resource: '*'
+
+### ECS Service ###
+  ECSJenkinsTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      ContainerDefinitions: 
+        - Essential: true
+          Name: !Sub '${ServiceName}'
+          PortMappings:
+            - ContainerPort: 8080
+            - ContainerPort: 50000
+          Environment:
+            - Name: JAVA_OPTS
+              Value: -Djenkins.install.runSetupWizard=false
+          MountPoints:
+            - ContainerPath: '/var/jenkins_home'
+              ReadOnly: false
+              SourceVolume: jenkins-efs
+          Secrets:
+            - Name: GitHubOAuthSecret
+              ValueFrom: !Sub '${GitHubOAuth}:ClientSecret::'
+            - Name: GitHubOAuthId
+              ValueFrom: !Sub '${GitHubOAuth}:ClientId::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub '/ecs/${ServiceName}'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-create-group: true
+              awslogs-stream-prefix: !Sub '${ServiceName}'
+          Image: !Ref ECRImage
+      Cpu: 512
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform: 
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !Ref ECSJenkinsTaskRole
+      ExecutionRoleArn: !Ref ECSJenkinsTaskRole
+      Volumes: 
+        - 
+          Name: 'jenkins-efs'
+          EFSVolumeConfiguration:
+              AuthorizationConfig:
+                AccessPointId: !Ref EFSAccessPoint
+                IAM: ENABLED
+              FilesystemId: !Ref ElasticFileSystem
+              RootDirectory: '/'
+              TransitEncryption: ENABLED
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${ServiceName}-task-def'
+
+  JenkinsECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupName: !Sub '${ServiceName}-SG'
+        GroupDescription: Allow NFS access to EFS
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref VPCCidr
+        - IpProtocol: tcp
+          FromPort: 50000
+          ToPort: 50000
+          CidrIp: !Ref VPCCidr
+
+  JenkinsECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ELBv2HTTPSListener
+    Properties: 
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref ECSJenkinsTaskDef
+      EnableExecuteCommand: True
+      ServiceRegistries:
+        - Port: 50000
+          RegistryArn: !GetAtt DNSDiscoveryService.Arn
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 300
+      LaunchType: FARGATE
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref Subnets
+          SecurityGroups: 
+            - !Ref JenkinsECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Sub '${ServiceName}'
+          ContainerPort: 8080
+          TargetGroupArn: !Ref JenkinsECSTargetGroup
+
+
+### EFS ###
+  ElasticFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    DependsOn: EFSSecurityGroup
+    Properties:
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ServiceName}-efs'
+        - Key: ServiceProvider
+          Value: Rackspace
+      ThroughputMode: bursting
+      Encrypted: true
+      PerformanceMode: generalPurpose
+    
+  EFSAccessPoint:
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      FileSystemId: !Ref ElasticFileSystem
+      PosixUser:
+        Uid: "0"
+        Gid: "0"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0755"
+        Path: "/"
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ServiceName}-efs-sg'
+      GroupDescription: Allow NFS access to EFS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: tcp
+        FromPort: 111
+        ToPort: 111
+        CidrIp: !Ref VPCCidr
+  
+  MountTargetAZ1:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      SubnetId: !Select [ 0, !Ref Subnets ]
+      FileSystemId: !Ref ElasticFileSystem
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
+  
+  MountTargetAZ2:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      SubnetId: !Select [ 1, !Ref Subnets ]
+      FileSystemId: !Ref ElasticFileSystem
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
+
+  EFSBurstCreditsAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: !Ref CWBurstCreditPeriod
+      Dimensions:
+        - Name: FileSystemId
+          Value: !Ref ElasticFileSystem
+      AlarmActions:
+        - !Ref 'AWS::NoValue'
+      AlarmDescription: !Sub >-
+        EFS Burst Credits have dropped below ${CWBurstCreditThreshold} for
+        ${CWBurstCreditPeriod} periods.
+      Namespace: AWS/EFS
+      Period: '3600'
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: !Ref CWBurstCreditThreshold
+      OKActions:
+        - !Ref 'AWS::NoValue'
+      Unit: Bytes
+      MetricName: BurstCreditBalance
+
+### ALB / TG ###  
+  ALBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: !Sub '${ServiceName}-ALB-SG'
+      GroupDescription: !Sub 'Security Group for ${ServiceName} ALB.'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags: 
+       - Key: "Name"
+         Value: !Sub '${ServiceName}-ALB-SG'
+  
+  JenkinsECSTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Name: !Sub '${ServiceName}-TG'
+      TargetType: ip
+      HealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckPath: '/login'
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+      TargetGroupAttributes:
+        - Value: 300
+          Key: deregistration_delay.timeout_seconds
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      Port: 8080
+      Tags:
+        - Key: Name
+          Value: !Sub '${ServiceName}-TG'
+        - Key: ServiceProvider
+          Value: Rackspace
+  ELBv2:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    DependsOn: ALBSecurityGroup
+    Properties:
+      Subnets: !Ref ELBSubnets
+      Name: !Sub '${ServiceName}-ALB'
+      Tags:
+        - Key: CloudformationStackName
+          Value: !Ref 'AWS::StackName'
+        - Key: Name
+          Value: !Sub '${ServiceName}-ALB'
+        - Key: ServiceProvider
+          Value: Rackspace
+      SecurityGroups: 
+        - !Ref ALBSecurityGroup
+      Scheme: !Ref Scheme
+      LoadBalancerAttributes:
+        - Value: true
+          Key: access_logs.s3.enabled
+        - Value: !Ref S3LoggingBucket
+          Key: access_logs.s3.bucket
+        - Value: !Sub '${ServiceName}-ALB'
+          Key: access_logs.s3.prefix
+        - Value: false
+          Key: deletion_protection.enabled
+  
+  ELBv2HTTPListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: ELBv2
+    Properties:
+      Protocol: HTTP
+      Port: 80
+      LoadBalancerArn: !Ref ELBv2
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: "#{host}"
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301      
+
+  ELBv2HTTPSListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: ELBv2HTTPListener
+    Properties:
+      Protocol: HTTPS
+      Port: 443
+      LoadBalancerArn: !Ref ELBv2
+      SslPolicy: 'ELBSecurityPolicy-FS-1-2-Res-2019-08'
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref JenkinsECSTargetGroup
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateArn
+
+  ELBDNSRecordSet:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${ServiceName}.${HostedZoneName}.'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt 
+          - ELBv2
+          - DNSName
+        HostedZoneId: !GetAtt 
+          - ELBv2
+          - CanonicalHostedZoneID
+
+### DNS Resources ####
+  DNSDiscoveryZone:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties: 
+      Name: !Sub '${ServiceName}'
+      Description: !Sub '${ServiceName} discovery managed Zone'
+      Vpc: !Ref VPC
+
+  DNSDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties: 
+      Name: !Sub '${ServiceName}-discovery-service'
+      Description: !Sub '${ServiceName}-discovery-service'
+      DnsConfig:
+        NamespaceId: !Ref DNSDiscoveryZone
+        DnsRecords:
+          - Type: A
+            TTL: 10
+          - Type: SRV
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig: 
+        FailureThreshold: 5
+
+Outputs:
+  FileSystemID:
+    Description: File system ID
+    Value: !Ref ElasticFileSystem
+
+  FileSystemDNS:
+    Description: File system DNS Name
+    Value: !Sub '${ElasticFileSystem}.efs.${AWS::Region}.amazonaws.com'
+
+  ALBDNSName:
+    Description: ELB DNS Name
+    Value: !GetAtt ELBv2.DNSName

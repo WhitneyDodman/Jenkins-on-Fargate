@@ -1,0 +1,22 @@
+sys_path: ./
+cfngin_bucket: ${cfngin_bucket}
+namespace: ${namespace}
+
+stacks:
+  - name: jenkins-ecs
+    template_path: cloudformation/ecs-jenkins.yml
+    enabled: true
+    variables:
+      VPC: ${VPC}
+      VPCCidr: ${VPCCidr}
+      Cluster: ${Cluster}
+      ECRImage: ${ECRImage}
+      Subnets: ${Subnets}
+      ELBSubnets: ${ELBSubnets}
+      S3LoggingBucket: ${S3LoggingBucket}
+      SSLCertificateArn: ${SSLCertificateArn}
+      HostedZoneName: ${HostedZoneName}
+      HostedZoneId: ${HostedZoneId}
+      Scheme: ${Scheme}
+      GitHubOAuth: ${GitHubOAuth}
+      ServiceName: ${ServiceName}
