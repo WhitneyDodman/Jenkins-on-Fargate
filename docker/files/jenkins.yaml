@@ -1,0 +1,80 @@
+jenkins:
+    systemMessage: "ECS Jenkins"
+    numExecutors: 0
+    remotingSecurity:
+      enabled: true
+    agentProtocols:
+        - "JNLP4-connect"
+    securityRealm:
+        github:
+          clientID: ${GitHubOAuthId}
+          clientSecret: ${GitHubOAuthSecret}
+          githubApiUri: "https://api.github.com"
+          githubWebUri: "https://github.com"
+          oauthScopes: "read:org,user:email,repo"
+    authorizationStrategy:
+        github:
+          adminUserNames: "comma, delimited, list"
+          allowAnonymousJobStatusPermission: false
+          allowAnonymousReadPermission: false
+          allowCcTrayPermission: false
+          allowGithubWebHookPermission: true
+          authenticatedUserCreateJobPermission: false
+          authenticatedUserReadPermission: false
+          organizationNames: "<OrgName>"
+          useRepositoryPermissions: true
+    crumbIssuer: "standard"
+    slaveAgentPort: 50000
+    clouds:
+        - ecs:
+              allowedOverrides: "all"
+              credentialsId: ""
+              cluster: "ecs-jenkins-runner"
+              name: "ecs-cloud-spot"
+              regionName: "us-east-1"
+              retentionTimeout: 10
+              jenkinsUrl: "http://ecs-jenkins-discovery-service.ecs-jenkins:8080"
+              templates:
+                  - cpu: "4096"
+                    image: "jenkins/inbound-agent"
+                    label: "build-ecs-spot"
+                    executionRole: "arn:aws:iam::<account_number>:role/ecs-jenkinsTask-Role"
+                    launchType: "FARGATE"
+                    memory: 0
+                    memoryReservation: 30720
+                    networkMode: "awsvpc"
+                    privileged: false
+                    remoteFSRoot: "/home/jenkins"
+                    securityGroups: "<Comma, Delimited, List>"
+                    sharedMemorySize: 0
+                    subnets: "<Comma, Delimited, List>"
+                    templateName: "build-ecs-spot"
+                    uniqueRemoteFSRoot: false
+        - ecs:
+              allowedOverrides: "all"
+              credentialsId: ""
+              cluster: "ecs-jenkins"
+              name: "ecs-cloud"
+              regionName: us-east-1
+              retentionTimeout: 10
+              jenkinsUrl: "http://ecs-jenkins-discovery-service.ecs-jenkins:8080"
+              templates:
+                  - cpu: "4096"
+                    image: "jenkins/inbound-agent"
+                    label: "build-ecs"
+                    executionRole: "arn:aws:iam::<account_number>:role/ecs-jenkinsTask-Role"
+                    launchType: "FARGATE"
+                    memory: 0
+                    memoryReservation: 30720
+                    networkMode: "awsvpc"
+                    privileged: false
+                    remoteFSRoot: "/home/jenkins"
+                    securityGroups: "<Comma, Delimited, List>"
+                    sharedMemorySize: 0
+                    subnets: "<Comma, Delimited, List>"
+                    templateName: "build-ecs"
+                    uniqueRemoteFSRoot: false
+security:
+  sSHD:
+    port: -1
+
