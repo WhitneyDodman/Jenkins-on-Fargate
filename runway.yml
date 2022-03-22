@@ -1,0 +1,9 @@
+deployments:
+  - name: ecs-jenkins
+    modules:
+      - jenkins-ecs.cfn
+      - jenkins-ecs-codebuild.cfn
+    regions:
+      - us-east-1
+    account-id: <account number>
+

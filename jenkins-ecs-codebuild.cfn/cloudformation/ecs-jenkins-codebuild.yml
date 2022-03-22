@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploys a CodeBuild Project that creates a docker image and uploads it ot ECR
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Parameters:
+          - ProjectName
+          - ProjectDescription
+          - SourceBucket
+          - SourceKey
+          - RepoName
+        Label:
+          default: Project Configuration
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'ECS-Jenkins-Image-Build'
+    Description: The name of the CodeBuild Project
+  ProjectDescription:
+    Type: String
+    Default: 'Creates a custom image from the latest Jenkins image'
+    Description: The name of the CodeBuild Project
+  SourceBucket:
+    Type: String
+    Description: The name of the S3 bucket where the ZIP package resides. This bucket must already exist.
+  SourceKey:
+    Type: String
+    Default: 'ecs-jenkins.zip'
+    Description: The name of the ZIP package (i.e. ecs-jenkins.zip)
+  RepoName:
+    Type: String
+    Default: 'ecs-jenkins'
+    Description: The name of the ECR Repo to upload image to   
+
+Resources:
+### IAM Resources ###
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-Project-Role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ecr-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:PutImage'
+                  - 'ecr:UploadLayerPart'
+                Resource: '*'
+        - PolicyName: s3-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${SourceBucket}'
+                  - !Sub 'arn:aws:s3:::${SourceBucket}/${SourceKey}'
+                  - !Sub 'arn:aws:s3:::${SourceBucket}/${SourceKey}/*'
+              - Effect: Allow
+                Action: 
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                Resource: !Sub 'arn:aws:s3:::codepipeline-${AWS::Region}-*'
+        - PolicyName: logs-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:PutLogEvents'
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}:*'
+        - PolicyName: codebuild-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'codebuild:CreateReportGroup'
+                  - 'codebuild:CreateReport'
+                  - 'codebuild:UpdateReport'
+                  - 'codebuild:BatchPutTestCases'
+                  - 'codebuild:BatchPutCodeCoverages'
+                Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${ProjectName}-*'
+
+  EventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-Event-Role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: events-codebuild
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuildProject.Arn
+
+### CodeBuild Resources ###
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties: 
+      Name: !Ref ProjectName
+      Description: !Ref ProjectDescription
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: 
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        PrivilegedMode: true
+        ImagePullCredentialsType: 'CODEBUILD'
+        EnvironmentVariables: 
+          - Name: AWS_DEFAULT_REGION
+            Value: !Sub '${AWS::Region}'
+            Type: PLAINTEXT
+          - Name: AWS_ACCOUNT_ID
+            Value: !Sub '${AWS::AccountId}'
+            Type: PLAINTEXT
+          - Name: IMAGE_TAG
+            Value: 'latest'
+            Type: PLAINTEXT
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref RepoName
+            Type: PLAINTEXT
+      Source: 
+        Type: S3
+        Location: !Sub '${SourceBucket}/${SourceKey}'
+      LogsConfig: 
+        CloudWatchLogs:
+          Status: ENABLED
+      TimeoutInMinutes: 60
+      QueuedTimeoutInMinutes: 120 
+
+### EventBridge Resources ###
+  ScheduledRule: 
+    DependsOn: CodeBuildProject
+    Type: AWS::Events::Rule
+    Properties: 
+        Name: !Sub '${ProjectName}-Rule'
+        Description: !Sub "Rule for ECR ${ProjectName}"
+        ScheduleExpression: "cron(0 12 ? * SUN *)"
+        Targets: 
+        - 
+            Arn: !GetAtt CodeBuildProject.Arn
+            Id: !Sub '${ProjectName}-Target'
+            RoleArn: !GetAtt EventRole.Arn

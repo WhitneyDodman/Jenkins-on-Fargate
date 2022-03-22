@@ -1,0 +1,10 @@
+sys_path: ./
+cfngin_bucket: ${cfngin_bucket}
+namespace: ${namespace}
+
+stacks:
+  - name: jenkins-ecs-codebuild
+    template_path: cloudformation/ecs-jenkins-codebuild.yml
+    enabled: true
+    variables:
+      SourceBucket: ${SourceBucket}
